@@ -36,7 +36,7 @@ app.post('/connect', async (req, res) => {
   try {
     if (conn) { try { conn.disconnect(); } catch (e) {} }
     conn = new TikTokLiveConnection(user, {
-      processInitialData: false,
+      processInitialData: true,
       connectWithUniqueId: true,
       signApiKey: EULER_KEY
     });
