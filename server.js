@@ -1,56 +1,55 @@
 const express = require('express');
 const { TikTokLiveConnection } = require('tiktok-live-connector');
 const app = express();
-const PORT = 8081;
+const PORT = process.env.PORT || 8081;
 
 let comments = [];
 let gifts = [];
 let conn = null;
-
-// ⚠️ PASTE YOUR API KEY INSIDE THE QUOTES BELOW
-const MY_API_KEY = "euler_NWJkNGYxMjhmNDYxNDU3MTk3Mjg1ZjFkMGUzMjQyOTBjMmUzZmExZDRkZTNhMzZmODc1ZDY0";
+let connectedUser = null;
 
 app.get('/comments', (req, res) => res.json(comments));
 app.get('/gifts', (req, res) => res.json(gifts));
-app.get('/', (req, res) => res.send('Relay is running'));
+app.get('/', (req, res) => res.send('Relay is running. Connected: ' + (connectedUser || 'none')));
 
 app.post('/connect', async (req, res) => {
-  const user = (req.query.user || '').replace('@', '');
-  if (!user) return res.status(400).send('No username given');
-  
+  const user = (req.query.user || '').replace('@', '').trim();
+  if (!user) return res.status(400).send('No username');
   try {
     if (conn) { try { conn.disconnect(); } catch (e) {} }
-    
     conn = new TikTokLiveConnection(user, {
       processInitialData: false,
-      signApiKey: MY_API_KEY
+      signApiKey: process.env.EULER_KEY
     });
-    
     await conn.connect();
+    connectedUser = user;
     comments = [];
     gifts = [];
     console.log('CONNECTED to @' + user);
-    
+
     conn.on('chat', d => {
-      console.log('COMMENT: ' + d.uniqueId + ': ' + d.comment);
-      comments.push({ user: d.uniqueId, text: d.comment, gift: '' });
+      console.log('RAW CHAT:', JSON.stringify(d));
+      const uid = d.uniqueId || d.userId || d.nickname || 'unknown';
+      const txt = d.comment || d.text || d.message || '';
+      console.log('PARSED -> user:', uid, '| text:', txt);
+      comments.push({ user: uid, text: txt, gift: '' });
       if (comments.length > 200) comments.shift();
     });
-    
+
     conn.on('gift', d => {
+      console.log('RAW GIFT:', JSON.stringify(d));
       if (d.giftType === 1 && !d.repeatEnd) return;
-      console.log('GIFT: ' + d.uniqueId + ' sent ' + d.giftName);
-      gifts.push({ user: d.uniqueId, gift: d.giftName, target: '' });
+      const uid = d.uniqueId || d.userId || 'unknown';
+      const gname = d.giftName || d.gift_name || d.gift || '';
+      gifts.push({ user: uid, gift: gname, target: '' });
       if (gifts.length > 200) gifts.shift();
     });
-    
+
     res.send('ok');
   } catch (e) {
-    console.log('CONNECT FAILED: ' + e.message);
+    console.log('CONNECT FAILED:', e.message);
     res.status(500).send(e.message);
   }
 });
 
-app.listen(PORT, () => {
-  console.log('Relay running on http://127.0.0.1:' + PORT);
-});
+app.listen(PORT, () => console.log('Relay on port ' + PORT));
