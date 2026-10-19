@@ -42,7 +42,7 @@ app.post('/connect', async (req, res) => {
     });
 
     // Register handlers BEFORE connecting
-    conn.on('chat', d => {
+    conn.on(WebcastEvent.CHAT, d => {
       eventCount++;
       lastEventAt = new Date().toISOString();
       const uid = d.uniqueId || d.userId || 'unknown';
@@ -52,7 +52,7 @@ app.post('/connect', async (req, res) => {
       if (comments.length > 200) comments.shift();
     });
 
-    conn.on('gift', d => {
+    conn.on(WebcastEvent.GIFT, d => {
       eventCount++;
       lastEventAt = new Date().toISOString();
       if (d.giftType === 1 && !d.repeatEnd) return;
