@@ -1,5 +1,5 @@
 const express = require('express');
-const { TikTokLiveConnection, SignConfig } = require('tiktok-live-connector');
+const { TikTokLiveConnection, SignConfig, WebcastEvent } = require('tiktok-live-connector');
 const app = express();
 const PORT = process.env.PORT || 8081;
 
