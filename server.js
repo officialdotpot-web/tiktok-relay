@@ -4,7 +4,7 @@ const app = express();
 const PORT = process.env.PORT || 8081;
 
 // Read from env first, fall back to hardcoded. Replace PASTE_KEY_HERE with your actual key.
-const EULER_KEY = process.env.EULER_KEY || process.env.SIGN_API_KEY || 'PASTE_KEY_HERE';
+const EULER_KEY = process.env.EULER_KEY || process.env.SIGN_API_KEY || 'euler_NWJkNGYxMjhmNDYxNDU3MTk3Mjg1ZjFkMGUzMjQyOTBjMmUzZmExZDRkZTNhMzZmODc1ZDY0';
 
 let comments = [];
 let gifts = [];
@@ -16,7 +16,7 @@ app.get('/comments', (req, res) => res.json(comments));
 app.get('/gifts', (req, res) => res.json(gifts));
 app.get('/status', (req, res) => res.json({
   connected: connectedUser,
-  hasKey: EULER_KEY !== 'PASTE_KEY_HERE' && EULER_KEY !== undefined,
+  hasKey: EULER_KEY !== 'euler_NWJkNGYxMjhmNDYxNDU3MTk3Mjg1ZjFkMGUzMjQyOTBjMmUzZmExZDRkZTNhMzZmODc1ZDY0' && EULER_KEY !== undefined,
   keyLength: EULER_KEY ? EULER_KEY.length : 0,
   lastError: lastError
 }));
