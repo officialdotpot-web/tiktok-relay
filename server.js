@@ -1,5 +1,8 @@
 const express = require('express');
-const { TikTokLiveConnection, SignConfig, WebcastEvent } = require('tiktok-live-connector');
+const tlc = require('tiktok-live-connector');
+const TikTokLiveConnection = tlc.TikTokLiveConnection;
+const SignConfig = tlc.SignConfig;
+const WebcastEvent = tlc.WebcastEvent;
 const app = express();
 const PORT = process.env.PORT || 8081;
 
@@ -11,63 +14,64 @@ let gifts = [];
 let conn = null;
 let connectedUser = null;
 let lastError = null;
-let eventCount = 0;
-let lastEventAt = null;
+let eventLog = [];
 
 app.get('/comments', (req, res) => res.json(comments));
 app.get('/gifts', (req, res) => res.json(gifts));
 app.get('/status', (req, res) => res.json({
   connected: connectedUser,
   keyLength: EULER_KEY.length,
-  eventCount: eventCount,
-  lastEventAt: lastEventAt,
-  commentsStored: comments.length,
-  giftsStored: gifts.length,
-  lastError: lastError,
-  libVersion: require('tiktok-live-connector/package.json').version
+  libVersion: require('tiktok-live-connector/package.json').version,
+  hasWebcastEvent: typeof WebcastEvent !== 'undefined',
+  chatEventName: (typeof WebcastEvent !== 'undefined' && WebcastEvent.CHAT) ? String(WebcastEvent.CHAT) : 'undefined',
+  eventLog: eventLog.slice(-15),
+  lastError: lastError
 }));
-app.get('/', (req, res) => res.send('Relay is running. Connected: ' + (connectedUser || 'none') + ' | events: ' + eventCount));
+app.get('/', (req, res) => res.send('Relay running. Connected: ' + (connectedUser || 'none')));
+
+app.post('/simulate', (req, res) => {
+  const user = req.query.user || 'testuser';
+  const text = req.query.text || 'join Roblox';
+  comments.push({ user: user, text: text, gift: '' });
+  res.send('simulated');
+});
 
 app.post('/connect', async (req, res) => {
   const user = (req.query.user || '').replace('@', '').trim();
   if (!user) return res.status(400).send('No username');
   lastError = null;
-  eventCount = 0;
+  eventLog = [];
   try {
     if (conn) { try { conn.disconnect(); } catch (e) {} }
-    conn = new TikTokLiveConnection(user, {
-      processInitialData: true,
-      connectWithUniqueId: true,
-      signApiKey: EULER_KEY
-    });
+    conn = new TikTokLiveConnection(user, { signApiKey: EULER_KEY });
 
-    // Register handlers BEFORE connecting
-    conn.on(WebcastEvent.CHAT, d => {
-      eventCount++;
-      lastEventAt = new Date().toISOString();
-      const uid = d.uniqueId || d.userId || 'unknown';
+    const origEmit = conn.emit.bind(conn);
+    conn.emit = function(eventName) {
+      eventLog.push(String(eventName));
+      if (eventLog.length > 50) eventLog.shift();
+      console.log('EVENT:', String(eventName));
+      return origEmit.apply(conn, arguments);
+    };
+
+    const onChat = function(d) {
+      const uid = d.uniqueId || (d.user && d.user.uniqueId) || 'unknown';
       const txt = d.comment || d.text || '';
       console.log('CHAT:', uid, '->', txt);
       comments.push({ user: uid, text: txt, gift: '' });
       if (comments.length > 200) comments.shift();
-    });
-
-    conn.on(WebcastEvent.GIFT, d => {
-      eventCount++;
-      lastEventAt = new Date().toISOString();
+    };
+    const onGift = function(d) {
       if (d.giftType === 1 && !d.repeatEnd) return;
-      const uid = d.uniqueId || d.userId || 'unknown';
+      const uid = d.uniqueId || (d.user && d.user.uniqueId) || 'unknown';
       const gname = d.giftName || d.gift_name || '';
-      console.log('GIFT:', uid, '->', gname);
       gifts.push({ user: uid, gift: gname, target: '' });
       if (gifts.length > 200) gifts.shift();
-    });
+    };
 
-    conn.on('member', d => { eventCount++; lastEventAt = new Date().toISOString(); console.log('MEMBER:', d.uniqueId); });
-    conn.on('sub', d => { eventCount++; lastEventAt = new Date().toISOString(); console.log('SUB:', d.uniqueId); });
-    conn.on('connected', s => { console.log('WS CONNECTED:', s.roomId); });
-    conn.on('disconnected', r => { console.log('WS DISCONNECTED:', r); });
-    conn.on('error', e => { console.log('WS ERROR:', e.message || e); });
+    if (WebcastEvent && WebcastEvent.CHAT) conn.on(WebcastEvent.CHAT, onChat);
+    if (WebcastEvent && WebcastEvent.GIFT) conn.on(WebcastEvent.GIFT, onGift);
+    conn.on('chat', onChat);
+    conn.on('gift', onGift);
 
     await conn.connect();
     connectedUser = user;
@@ -83,4 +87,4 @@ app.post('/connect', async (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log('Relay on port ' + PORT + ' | keyLength=' + EULER_KEY.length));
+app.listen(PORT, () => console.log('Relay port ' + PORT + ' | keyLen ' + EULER_KEY.length));
