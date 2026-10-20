@@ -15,17 +15,20 @@ let conn = null;
 let connectedUser = null;
 let lastError = null;
 let eventLog = [];
+let typeCounts = {};
+let samples = {};
 let chatCount = 0;
 
 app.get('/comments', (req, res) => res.json(comments));
 app.get('/gifts', (req, res) => res.json(gifts));
 app.get('/status', (req, res) => res.json({
   connected: connectedUser,
-  keyLength: EULER_KEY.length,
   libVersion: require('tiktok-live-connector/package.json').version,
   chatCount: chatCount,
   commentsStored: comments.length,
-  eventLog: eventLog.slice(-20),
+  typeCounts: typeCounts,
+  samples: samples,
+  eventLog: eventLog.slice(-15),
   lastError: lastError
 }));
 app.get('/', (req, res) => res.send('Relay running. Connected: ' + (connectedUser || 'none')));
@@ -33,65 +36,69 @@ app.get('/', (req, res) => res.send('Relay running. Connected: ' + (connectedUse
 app.post('/connect', async (req, res) => {
   const user = (req.query.user || '').replace('@', '').trim();
   if (!user) return res.status(400).send('No username');
-  lastError = null;
-  eventLog = [];
-  chatCount = 0;
+  lastError = null; eventLog = []; typeCounts = {}; samples = {}; chatCount = 0;
   try {
     if (conn) { try { conn.disconnect(); } catch (e) {} }
     conn = new TikTokLiveConnection(user, { signApiKey: EULER_KEY });
 
-    // Log every event so we can see what's firing
     const origEmit = conn.emit.bind(conn);
-    conn.emit = function(eventName) {
-      eventLog.push(String(eventName));
+    conn.emit = function(name) {
+      eventLog.push(String(name));
       if (eventLog.length > 60) eventLog.shift();
       return origEmit.apply(conn, arguments);
     };
 
-    // Helper: pull user + text out of any TikTok data shape
-    function extract(d) {
-      const u = d.user || d;
-      const uid = u.uniqueId || u.userId || u.nickname || d.uniqueId || '';
-      const txt = d.content || d.comment || d.text ||
-                  (d.common && d.common.displayText) ||
-                  (d.displayText) || '';
-      return { uid, txt };
+    function tryExtractChat(data) {
+      const payload = data.payload || data;
+      let uid = '';
+      if (payload.user && payload.user.uniqueId) uid = payload.user.uniqueId;
+      else if (payload.uniqueId) uid = payload.uniqueId;
+
+      let txt = '';
+      if (payload.content) txt = payload.content;
+      else if (payload.comment) txt = payload.comment;
+      else if (payload.common && payload.common.displayText) txt = payload.common.displayText;
+
+      if (uid && txt) {
+        chatCount++;
+        console.log('CHAT EXTRACTED:', uid, '->', txt);
+        comments.push({ user: uid, text: txt, gift: '' });
+        if (comments.length > 200) comments.shift();
+        return true;
+      }
+      return false;
     }
 
-    function recordChat(d) {
-      const { uid, txt } = extract(d);
-      if (!uid || !txt) return;
-      chatCount++;
-      console.log('CHAT:', uid, '->', txt);
-      comments.push({ user: uid, text: txt, gift: '' });
-      if (comments.length > 200) comments.shift();
-    }
-
-    function recordGift(d) {
-      if (d.giftType === 1 && !d.repeatEnd) return;
-      const { uid } = extract(d);
-      const gname = d.giftName || d.gift_name || (d.gift && d.gift.name) || '';
-      if (!uid || !gname) return;
-      console.log('GIFT:', uid, '->', gname);
-      gifts.push({ user: uid, gift: gname, target: '' });
-      if (gifts.length > 200) gifts.shift();
-    }
-
-    // Try every possible event name the library might use
-    if (WebcastEvent && WebcastEvent.CHAT) conn.on(WebcastEvent.CHAT, recordChat);
-    if (WebcastEvent && WebcastEvent.GIFT) conn.on(WebcastEvent.GIFT, recordGift);
-    conn.on('chat', recordChat);
-    conn.on('gift', recordGift);
-
-    // THE CRITICAL FIX: parse raw decodedData directly
     conn.on('decodedData', (data) => {
       if (!data) return;
-      const type = data.type || (data.common && data.common.type) || '';
-      const payload = data.payload || data;
-      if (type.indexOf('Chat') !== -1 || (payload && payload.common && payload.common.displayText && !payload.giftId)) {
-        recordChat(payload);
-      } else if (type.indexOf('Gift') !== -1 || (payload && payload.giftId)) {
-        recordGift(payload);
+      let t = 'unknown';
+      if (typeof data.type === 'string') t = data.type;
+      else if (typeof data.type === 'number') t = 'num:' + data.type;
+      else if (data.common && typeof data.common.type === 'string') t = data.common.type;
+
+      typeCounts[t] = (typeCounts[t] || 0) + 1;
+
+      if (!samples[t] && Object.keys(samples).length < 6) {
+        try { samples[t] = JSON.stringify(data).substring(0, 400); }
+        catch (e) { samples[t] = 'unserializable'; }
+      }
+
+      tryExtractChat(data);
+    });
+
+    conn.on('chat', (d) => {
+      console.log('CHAT EVENT:', JSON.stringify(d).substring(0, 200));
+      tryExtractChat(d);
+    });
+
+    conn.on('gift', (d) => {
+      if (d.giftType === 1 && !d.repeatEnd) return;
+      const payload = d.payload || d;
+      const uid = (payload.user && payload.user.uniqueId) || payload.uniqueId || '';
+      const gname = payload.giftName || (payload.gift && payload.gift.name) || '';
+      if (uid && gname) {
+        gifts.push({ user: uid, gift: gname, target: '' });
+        if (gifts.length > 200) gifts.shift();
       }
     });
 
