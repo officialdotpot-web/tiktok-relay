@@ -2,7 +2,6 @@ const express = require('express');
 const tlc = require('tiktok-live-connector');
 const TikTokLiveConnection = tlc.TikTokLiveConnection;
 const SignConfig = tlc.SignConfig;
-const WebcastEvent = tlc.WebcastEvent;
 const app = express();
 const PORT = process.env.PORT || 8081;
 
@@ -33,6 +32,22 @@ app.get('/status', (req, res) => res.json({
 }));
 app.get('/', (req, res) => res.send('Relay running. Connected: ' + (connectedUser || 'none')));
 
+function extractUser(obj) {
+  if (!obj) return '';
+  if (obj.user && obj.user.uniqueId) return obj.user.uniqueId;
+  if (obj.uniqueId) return obj.uniqueId;
+  return '';
+}
+
+function recordChat(uid, txt) {
+  if (!uid || !txt) return false;
+  chatCount++;
+  console.log('CHAT:', uid, '->', txt);
+  comments.push({ user: uid, text: txt, gift: '' });
+  if (comments.length > 200) comments.shift();
+  return true;
+}
+
 app.post('/connect', async (req, res) => {
   const user = (req.query.user || '').replace('@', '').trim();
   if (!user) return res.status(400).send('No username');
@@ -48,57 +63,30 @@ app.post('/connect', async (req, res) => {
       return origEmit.apply(conn, arguments);
     };
 
-    function tryExtractChat(data) {
-      const payload = data.payload || data;
-      let uid = '';
-      if (payload.user && payload.user.uniqueId) uid = payload.user.uniqueId;
-      else if (payload.uniqueId) uid = payload.uniqueId;
-
-      let txt = '';
-      if (payload.content) txt = payload.content;
-      else if (payload.comment) txt = payload.comment;
-      else if (payload.common && payload.common.displayText) txt = payload.common.displayText;
-
-      if (uid && txt) {
-        chatCount++;
-        console.log('CHAT EXTRACTED:', uid, '->', txt);
-        comments.push({ user: uid, text: txt, gift: '' });
-        if (comments.length > 200) comments.shift();
-        return true;
-      }
-      return false;
-    }
-
-    conn.on('decodedData', (data) => {
-      if (!data) return;
-      let t = 'unknown';
-      if (typeof data.type === 'string') t = data.type;
-      else if (typeof data.type === 'number') t = 'num:' + data.type;
-      else if (data.common && typeof data.common.type === 'string') t = data.common.type;
-
+    // v2.5 decodedData fires as (typeString, payloadObject)
+    conn.on('decodedData', (type, payload) => {
+      const t = typeof type === 'string' ? type : 'unknown';
       typeCounts[t] = (typeCounts[t] || 0) + 1;
 
-      if (!samples[t] && Object.keys(samples).length < 6) {
-        try { samples[t] = JSON.stringify(data).substring(0, 400); }
+      if (!samples[t] && Object.keys(samples).length < 8) {
+        try { samples[t] = JSON.stringify(payload).substring(0, 500); }
         catch (e) { samples[t] = 'unserializable'; }
       }
 
-      tryExtractChat(data);
-    });
+      if (t === 'WebcastChatMessage' && payload) {
+        const uid = extractUser(payload);
+        const txt = payload.content || payload.comment || '';
+        recordChat(uid, txt);
+      }
 
-    conn.on('chat', (d) => {
-      console.log('CHAT EVENT:', JSON.stringify(d).substring(0, 200));
-      tryExtractChat(d);
-    });
-
-    conn.on('gift', (d) => {
-      if (d.giftType === 1 && !d.repeatEnd) return;
-      const payload = d.payload || d;
-      const uid = (payload.user && payload.user.uniqueId) || payload.uniqueId || '';
-      const gname = payload.giftName || (payload.gift && payload.gift.name) || '';
-      if (uid && gname) {
-        gifts.push({ user: uid, gift: gname, target: '' });
-        if (gifts.length > 200) gifts.shift();
+      if (t === 'WebcastGiftMessage' && payload) {
+        if (payload.giftType === 1 && !payload.repeatEnd) return;
+        const uid = extractUser(payload);
+        const gname = payload.giftName || (payload.gift && payload.gift.name) || '';
+        if (uid && gname) {
+          gifts.push({ user: uid, gift: gname, target: '' });
+          if (gifts.length > 200) gifts.shift();
+        }
       }
     });
 
