@@ -17,6 +17,7 @@ let eventLog = [];
 let typeCounts = {};
 let samples = {};
 let chatCount = 0;
+let rawMatches = [];
 
 app.get('/comments', (req, res) => res.json(comments));
 app.get('/gifts', (req, res) => res.json(gifts));
@@ -27,15 +28,16 @@ app.get('/status', (req, res) => res.json({
   commentsStored: comments.length,
   typeCounts: typeCounts,
   samples: samples,
+  rawMatches: rawMatches,
   eventLog: eventLog.slice(-15),
   lastError: lastError
 }));
 app.get('/', (req, res) => res.send('Relay running. Connected: ' + (connectedUser || 'none')));
 
-function extractUser(obj) {
-  if (!obj) return '';
-  if (obj.user && obj.user.uniqueId) return obj.user.uniqueId;
-  if (obj.uniqueId) return obj.uniqueId;
+function extractUser(d) {
+  if (!d) return '';
+  if (d.user && d.user.uniqueId) return d.user.uniqueId;
+  if (d.uniqueId) return d.uniqueId;
   return '';
 }
 
@@ -48,13 +50,45 @@ function recordChat(uid, txt) {
   return true;
 }
 
+function handlePayload(type, payload) {
+  const t = typeof type === 'string' ? type : 'unknown';
+  typeCounts[t] = (typeCounts[t] || 0) + 1;
+
+  if (!samples[t] && Object.keys(samples).length < 8) {
+    try { samples[t] = JSON.stringify(payload).substring(0, 500); }
+    catch (e) { samples[t] = 'unserializable'; }
+  }
+
+  // The payload is {type, data}. Content lives inside .data
+  const d = (payload && payload.data) ? payload.data : payload || {};
+
+  if (t.indexOf('Chat') !== -1) {
+    const uid = extractUser(d);
+    const txt = d.content || d.comment || (d.common && d.common.displayText) || '';
+    recordChat(uid, txt);
+  }
+
+  if (t.indexOf('Gift') !== -1) {
+    if (d.giftType === 1 && !d.repeatEnd) return;
+    const uid = extractUser(d);
+    const gname = d.giftName || (d.gift && d.gift.name) || '';
+    if (uid && gname) {
+      gifts.push({ user: uid, gift: gname, target: '' });
+      if (gifts.length > 200) gifts.shift();
+    }
+  }
+}
+
 app.post('/connect', async (req, res) => {
   const user = (req.query.user || '').replace('@', '').trim();
   if (!user) return res.status(400).send('No username');
-  lastError = null; eventLog = []; typeCounts = {}; samples = {}; chatCount = 0;
+  lastError = null; eventLog = []; typeCounts = {}; samples = {}; chatCount = 0; rawMatches = [];
   try {
     if (conn) { try { conn.disconnect(); } catch (e) {} }
-    conn = new TikTokLiveConnection(user, { signApiKey: EULER_KEY });
+    conn = new TikTokLiveConnection(user, {
+      signApiKey: EULER_KEY,
+      processInitialData: true
+    });
 
     const origEmit = conn.emit.bind(conn);
     conn.emit = function(name) {
@@ -63,31 +97,23 @@ app.post('/connect', async (req, res) => {
       return origEmit.apply(conn, arguments);
     };
 
-    // v2.5 decodedData fires as (typeString, payloadObject)
-    conn.on('decodedData', (type, payload) => {
-      const t = typeof type === 'string' ? type : 'unknown';
-      typeCounts[t] = (typeCounts[t] || 0) + 1;
+    // Capture chat with the correct payload.data path
+    conn.on('decodedData', (type, payload) => handlePayload(type, payload));
 
-      if (!samples[t] && Object.keys(samples).length < 8) {
-        try { samples[t] = JSON.stringify(payload).substring(0, 500); }
-        catch (e) { samples[t] = 'unserializable'; }
-      }
+    // Fallback signature (some builds pass one object)
+    conn.on('decodedData', (arg1) => {
+      if (arg1 && arg1.type && arg1.data) handlePayload(arg1.type, arg1);
+    });
 
-      if (t === 'WebcastChatMessage' && payload) {
-        const uid = extractUser(payload);
-        const txt = payload.content || payload.comment || '';
-        recordChat(uid, txt);
-      }
-
-      if (t === 'WebcastGiftMessage' && payload) {
-        if (payload.giftType === 1 && !payload.repeatEnd) return;
-        const uid = extractUser(payload);
-        const gname = payload.giftName || (payload.gift && payload.gift.name) || '';
-        if (uid && gname) {
-          gifts.push({ user: uid, gift: gname, target: '' });
-          if (gifts.length > 200) gifts.shift();
+    // Scan raw websocketData for chat-looking strings (debug only)
+    conn.on('websocketData', (d) => {
+      if (!d) return;
+      try {
+        const str = typeof d === 'string' ? d : JSON.stringify(d);
+        if (str && str.indexOf('WebcastChatMessage') !== -1 && rawMatches.length < 3) {
+          rawMatches.push(str.substring(0, 400));
         }
-      }
+      } catch (e) {}
     });
 
     await conn.connect();
