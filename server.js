@@ -13,11 +13,10 @@ let gifts = [];
 let conn = null;
 let connectedUser = null;
 let lastError = null;
-let eventLog = [];
-let typeCounts = {};
-let samples = {};
 let chatCount = 0;
-let rawMatches = [];
+let giftCount = 0;
+let lastChat = null;
+let lastGift = null;
 
 app.get('/comments', (req, res) => res.json(comments));
 app.get('/gifts', (req, res) => res.json(gifts));
@@ -25,64 +24,44 @@ app.get('/status', (req, res) => res.json({
   connected: connectedUser,
   libVersion: require('tiktok-live-connector/package.json').version,
   chatCount: chatCount,
+  giftCount: giftCount,
   commentsStored: comments.length,
-  typeCounts: typeCounts,
-  samples: samples,
-  rawMatches: rawMatches,
-  eventLog: eventLog.slice(-15),
+  giftsStored: gifts.length,
+  lastChat: lastChat,
+  lastGift: lastGift,
   lastError: lastError
 }));
 app.get('/', (req, res) => res.send('Relay running. Connected: ' + (connectedUser || 'none')));
 
-function extractUser(d) {
+function pickUser(d) {
   if (!d) return '';
-  if (d.user && d.user.uniqueId) return d.user.uniqueId;
-  if (d.uniqueId) return d.uniqueId;
-  return '';
+  return d.uniqueId || (d.user && d.user.uniqueId) || (d.user && d.user.nickname) || '';
 }
 
 function recordChat(uid, txt) {
   if (!uid || !txt) return false;
   chatCount++;
+  lastChat = { user: uid, text: txt };
   console.log('CHAT:', uid, '->', txt);
   comments.push({ user: uid, text: txt, gift: '' });
   if (comments.length > 200) comments.shift();
   return true;
 }
 
-function handlePayload(type, payload) {
-  const t = typeof type === 'string' ? type : 'unknown';
-  typeCounts[t] = (typeCounts[t] || 0) + 1;
-
-  if (!samples[t] && Object.keys(samples).length < 8) {
-    try { samples[t] = JSON.stringify(payload).substring(0, 500); }
-    catch (e) { samples[t] = 'unserializable'; }
-  }
-
-  // The payload is {type, data}. Content lives inside .data
-  const d = (payload && payload.data) ? payload.data : payload || {};
-
-  if (t.indexOf('Chat') !== -1) {
-    const uid = extractUser(d);
-    const txt = d.content || d.comment || (d.common && d.common.displayText) || '';
-    recordChat(uid, txt);
-  }
-
-  if (t.indexOf('Gift') !== -1) {
-    if (d.giftType === 1 && !d.repeatEnd) return;
-    const uid = extractUser(d);
-    const gname = d.giftName || (d.gift && d.gift.name) || '';
-    if (uid && gname) {
-      gifts.push({ user: uid, gift: gname, target: '' });
-      if (gifts.length > 200) gifts.shift();
-    }
-  }
+function recordGift(uid, gname) {
+  if (!uid || !gname) return false;
+  giftCount++;
+  lastGift = { user: uid, gift: gname };
+  console.log('GIFT:', uid, '->', gname);
+  gifts.push({ user: uid, gift: gname, target: '' });
+  if (gifts.length > 200) gifts.shift();
+  return true;
 }
 
 app.post('/connect', async (req, res) => {
   const user = (req.query.user || '').replace('@', '').trim();
   if (!user) return res.status(400).send('No username');
-  lastError = null; eventLog = []; typeCounts = {}; samples = {}; chatCount = 0; rawMatches = [];
+  lastError = null; chatCount = 0; giftCount = 0; lastChat = null; lastGift = null;
   try {
     if (conn) { try { conn.disconnect(); } catch (e) {} }
     conn = new TikTokLiveConnection(user, {
@@ -90,30 +69,37 @@ app.post('/connect', async (req, res) => {
       processInitialData: true
     });
 
-    const origEmit = conn.emit.bind(conn);
-    conn.emit = function(name) {
-      eventLog.push(String(name));
-      if (eventLog.length > 60) eventLog.shift();
-      return origEmit.apply(conn, arguments);
-    };
-
-    // Capture chat with the correct payload.data path
-    conn.on('decodedData', (type, payload) => handlePayload(type, payload));
-
-    // Fallback signature (some builds pass one object)
-    conn.on('decodedData', (arg1) => {
-      if (arg1 && arg1.type && arg1.data) handlePayload(arg1.type, arg1);
+    // NATIVE chat event — this is what fires (we saw "chat" in eventLog)
+    conn.on('chat', (d) => {
+      if (!d) return;
+      const uid = pickUser(d);
+      const txt = d.comment || d.content || d.text || '';
+      recordChat(uid, txt);
     });
 
-    // Scan raw websocketData for chat-looking strings (debug only)
-    conn.on('websocketData', (d) => {
+    // NATIVE gift event
+    conn.on('gift', (d) => {
       if (!d) return;
-      try {
-        const str = typeof d === 'string' ? d : JSON.stringify(d);
-        if (str && str.indexOf('WebcastChatMessage') !== -1 && rawMatches.length < 3) {
-          rawMatches.push(str.substring(0, 400));
-        }
-      } catch (e) {}
+      if (d.giftType === 1 && !d.repeatEnd) return;
+      const uid = pickUser(d);
+      const gname = d.giftName || (d.gift && d.gift.name) || '';
+      recordGift(uid, gname);
+    });
+
+    // Fallback: decodedData (payload is {type, data})
+    conn.on('decodedData', (type, payload) => {
+      const t = typeof type === 'string' ? type : '';
+      if (t !== 'WebcastChatMessage' && t !== 'WebcastGiftMessage') return;
+      const d = (payload && payload.data) ? payload.data : payload || {};
+      const uid = pickUser(d);
+      if (t === 'WebcastChatMessage') {
+        const txt = d.content || d.comment || '';
+        recordChat(uid, txt);
+      } else {
+        if (d.giftType === 1 && !d.repeatEnd) return;
+        const gname = d.giftName || (d.gift && d.gift.name) || '';
+        recordGift(uid, gname);
+      }
     });
 
     await conn.connect();
